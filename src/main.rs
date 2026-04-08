@@ -15,6 +15,7 @@ use tokio::net::UdpSocket;
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const PNET_ADDR: &str = "127.0.0.1:7777";
+const TOKEN_FILE: &str = "pnet_token.bin";
 /// Port that pnet pushes received app packets to (registered with pnet).
 const PUSH_PORT: u16 = 8888;
 /// Port used for control requests (register, get-data) and their replies.
@@ -218,6 +219,19 @@ fn parse_get_data(reply: &[u8], inner: &mut Inner) {
     inner.app_labels = app_labels;
 }
 
+// ── Token persistence ─────────────────────────────────────────────────────────
+
+fn load_token() -> Option<[u8; 16]> {
+    let bytes = std::fs::read(TOKEN_FILE).ok()?;
+    bytes.as_slice().try_into().ok()
+}
+
+fn save_token(token: &[u8; 16]) {
+    if let Err(e) = std::fs::write(TOKEN_FILE, token) {
+        eprintln!("[token] failed to save: {e}");
+    }
+}
+
 // ── Registration ──────────────────────────────────────────────────────────────
 
 async fn register(ctrl: &UdpSocket, pnet_addr: SocketAddr) -> Option<[u8; 16]> {
@@ -376,13 +390,39 @@ async fn main() {
     );
 
     eprintln!("[startup] push port {PUSH_PORT}, ctrl port {CTRL_PORT}");
-    eprintln!("[startup] registering with pnet at {PNET_ADDR}...");
 
-    let token = match register(&ctrl_socket, pnet_addr).await {
-        Some(t) => { eprintln!("[startup] token = {}", hex(&t)); t }
-        None => {
-            eprintln!("[startup] registration failed — is pnet running on {PNET_ADDR}?");
-            std::process::exit(1);
+    // Try to reuse a saved token before registering fresh.
+    let token = if let Some(saved) = load_token() {
+        eprintln!("[startup] found saved token {}, verifying...", hex(&saved));
+        let inner_tmp = Mutex::new(Inner {
+            token: Some(saved),
+            app_info: None,
+            destinations: Vec::new(),
+            app_labels: HashMap::new(),
+            messages: Vec::new(),
+        });
+        fetch_data(&ctrl_socket, pnet_addr, &saved, &inner_tmp).await;
+        if inner_tmp.lock().unwrap().app_info.is_some() {
+            eprintln!("[startup] saved token is valid");
+            saved
+        } else {
+            eprintln!("[startup] saved token rejected, registering fresh...");
+            match register(&ctrl_socket, pnet_addr).await {
+                Some(t) => { save_token(&t); eprintln!("[startup] token = {}", hex(&t)); t }
+                None => {
+                    eprintln!("[startup] registration failed — is pnet running on {PNET_ADDR}?");
+                    std::process::exit(1);
+                }
+            }
+        }
+    } else {
+        eprintln!("[startup] no saved token, registering with pnet at {PNET_ADDR}...");
+        match register(&ctrl_socket, pnet_addr).await {
+            Some(t) => { save_token(&t); eprintln!("[startup] token = {}", hex(&t)); t }
+            None => {
+                eprintln!("[startup] registration failed — is pnet running on {PNET_ADDR}?");
+                std::process::exit(1);
+            }
         }
     };
 
