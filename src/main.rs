@@ -391,6 +391,9 @@ async fn main() {
 
     eprintln!("[startup] push port {PUSH_PORT}, ctrl port {CTRL_PORT}");
 
+    const STARTUP_RETRIES: u32 = 4;
+    const STARTUP_RETRY_DELAY_SECS: u64 = 2;
+
     // Try to reuse a saved token before registering fresh.
     let token = if let Some(saved) = load_token() {
         eprintln!("[startup] found saved token {}, verifying...", hex(&saved));
@@ -401,8 +404,19 @@ async fn main() {
             app_labels: HashMap::new(),
             messages: Vec::new(),
         });
-        fetch_data(&ctrl_socket, pnet_addr, &saved, &inner_tmp).await;
-        if inner_tmp.lock().unwrap().app_info.is_some() {
+        let mut verified = false;
+        for attempt in 1..=STARTUP_RETRIES + 1 {
+            fetch_data(&ctrl_socket, pnet_addr, &saved, &inner_tmp).await;
+            if inner_tmp.lock().unwrap().app_info.is_some() {
+                verified = true;
+                break;
+            }
+            if attempt <= STARTUP_RETRIES {
+                eprintln!("[startup] fetch attempt {attempt} failed, retrying in {STARTUP_RETRY_DELAY_SECS}s...");
+                tokio::time::sleep(std::time::Duration::from_secs(STARTUP_RETRY_DELAY_SECS)).await;
+            }
+        }
+        if verified {
             eprintln!("[startup] saved token is valid");
             saved
         } else {
