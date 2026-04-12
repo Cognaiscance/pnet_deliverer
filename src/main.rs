@@ -62,6 +62,7 @@ struct Inner {
     /// sender_app_id → display label
     app_labels: HashMap<u16, String>,
     messages: Vec<Message>,
+    last_fetch_ok: Option<u64>,
 }
 
 struct AppState {
@@ -276,7 +277,11 @@ async fn fetch_data(ctrl: &UdpSocket, pnet_addr: SocketAddr, token: &[u8; 16], i
         return;
     }
 
-    parse_get_data(reply, &mut inner.lock().unwrap());
+    let mut guard = inner.lock().unwrap();
+    parse_get_data(reply, &mut guard);
+    if guard.app_info.is_some() {
+        guard.last_fetch_ok = Some(now_secs());
+    }
 }
 
 // ── UDP push receive loop ─────────────────────────────────────────────────────
@@ -318,6 +323,7 @@ struct ApiState {
     app_info: Option<AppInfo>,
     destinations: Vec<Destination>,
     messages: Vec<Message>,
+    last_fetch_ok: Option<u64>,
 }
 
 async fn handle_state(State(state): State<Arc<AppState>>) -> Json<ApiState> {
@@ -327,6 +333,7 @@ async fn handle_state(State(state): State<Arc<AppState>>) -> Json<ApiState> {
         app_info: inner.app_info.clone(),
         destinations: inner.destinations.clone(),
         messages: inner.messages.clone(),
+        last_fetch_ok: inner.last_fetch_ok,
     })
 }
 
@@ -372,6 +379,21 @@ async fn handle_refresh(State(state): State<Arc<AppState>>) -> Json<serde_json::
     Json(serde_json::json!({ "ok": true }))
 }
 
+// ── Background data refresh loop ─────────────────────────────────────────────
+
+async fn data_refresh_loop(state: Arc<AppState>) {
+    loop {
+        let connected = state.inner.lock().unwrap().app_info.is_some();
+        let delay_secs = if connected { 30 } else { 5 };
+        tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+
+        let token = state.inner.lock().unwrap().token;
+        if let Some(token) = token {
+            fetch_data(&state.ctrl_socket, state.pnet_addr, &token, &state.inner).await;
+        }
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -403,6 +425,7 @@ async fn main() {
             destinations: Vec::new(),
             app_labels: HashMap::new(),
             messages: Vec::new(),
+            last_fetch_ok: None,
         });
         let mut verified = false;
         for attempt in 1..=STARTUP_RETRIES + 1 {
@@ -418,17 +441,11 @@ async fn main() {
         }
         if verified {
             eprintln!("[startup] saved token is valid");
-            saved
         } else {
-            eprintln!("[startup] saved token rejected, registering fresh...");
-            match register(&ctrl_socket, pnet_addr).await {
-                Some(t) => { save_token(&t); eprintln!("[startup] token = {}", hex(&t)); t }
-                None => {
-                    eprintln!("[startup] registration failed — is pnet running on {PNET_ADDR}?");
-                    std::process::exit(1);
-                }
-            }
+            eprintln!("[startup] could not reach pnet — will keep retrying in background");
+            eprintln!("[startup] if the token is invalid, delete {TOKEN_FILE} to re-register");
         }
+        saved
     } else {
         eprintln!("[startup] no saved token, registering with pnet at {PNET_ADDR}...");
         match register(&ctrl_socket, pnet_addr).await {
@@ -450,6 +467,7 @@ async fn main() {
             destinations: Vec::new(),
             app_labels: HashMap::new(),
             messages: Vec::new(),
+            last_fetch_ok: None,
         }),
     });
 
@@ -463,6 +481,7 @@ async fn main() {
     }
 
     tokio::spawn(push_receive_loop(state.clone()));
+    tokio::spawn(data_refresh_loop(state.clone()));
 
     let app = Router::new()
         .route("/", get(handle_index))
@@ -558,6 +577,9 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       }
 
       const statusEl = document.getElementById('status');
+      const syncLine = s.last_fetch_ok
+        ? `<small style="color:#888;margin-top:4px;display:block">Last synced: ${new Date(s.last_fetch_ok * 1000).toLocaleTimeString()}</small>`
+        : `<small style="color:#c08020;margin-top:4px;display:block">Last synced: never — waiting for pnet\u2026</small>`;
       if (s.app_info) {
         const badge = s.approved
           ? '<span class="badge ok">APPROVED</span>'
@@ -567,9 +589,10 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         if (!s.approved) {
           statusEl.innerHTML += '<br><small style="color:#888;margin-top:4px;display:block">Approve this app in the pnet admin UI, then click Refresh.</small>';
         }
+        statusEl.innerHTML += syncLine;
       } else {
         statusEl.className = 'status pending';
-        statusEl.textContent = 'Not registered.';
+        statusEl.innerHTML = 'Not registered.' + syncLine;
       }
 
       const msgEl = document.getElementById('messages');
