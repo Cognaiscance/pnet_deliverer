@@ -148,6 +148,7 @@ fn parse_get_data(reply: &[u8], inner: &mut Inner) {
     let Some(&approved_byte) = reply.get(pos) else { return };
     pos += 1;
     pos += 16; // token
+    let Some(local_device_uuid) = read_bytes::<16>(reply, &mut pos) else { return };
 
     inner.app_info = Some(AppInfo {
         id: app_id,
@@ -177,7 +178,11 @@ fn parse_get_data(reply: &[u8], inner: &mut Inner) {
             pos += 4 + 2 + 1; // ip + port + user_approved
             let label = format!("{dev_alias} / {app_alias}");
             app_labels.insert(aid, label.clone());
-            if aid != app_id {
+            // Exclude only the specific app instance that is this deliverer
+            // (same device AND same app ID).  App IDs are device-scoped, so
+            // two devices can each have an app with id=1; comparing only the
+            // numeric ID would incorrectly drop apps on other devices.
+            if !(dev_uuid == local_device_uuid && aid == app_id) {
                 destinations.push(Destination {
                     device_uuid: dev_uuid.to_vec(),
                     app_id: aid,
