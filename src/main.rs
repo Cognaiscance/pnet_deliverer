@@ -404,7 +404,10 @@ async fn data_refresh_loop(state: Arc<AppState>) {
 #[tokio::main]
 async fn main() {
     let pnet_addr_str = std::env::var("PNET_ADDR").unwrap_or_else(|_| PNET_ADDR_DEFAULT.to_string());
-    let pnet_addr: SocketAddr = pnet_addr_str.parse().expect("invalid PNET_ADDR");
+    let pnet_addr: SocketAddr = tokio::net::lookup_host(&pnet_addr_str).await
+        .unwrap_or_else(|e| panic!("invalid PNET_ADDR {pnet_addr_str:?}: {e}"))
+        .next()
+        .unwrap_or_else(|| panic!("PNET_ADDR {pnet_addr_str:?} resolved to no addresses"));
 
     let push_socket = Arc::new(
         UdpSocket::bind(format!("0.0.0.0:{PUSH_PORT}"))
