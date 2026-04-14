@@ -453,11 +453,11 @@ async fn main() {
         }
         saved
     } else {
-        eprintln!("[startup] no saved token, registering with pnet at {PNET_ADDR}...");
+        eprintln!("[startup] no saved token, registering with pnet at {pnet_addr}...");
         match register(&ctrl_socket, pnet_addr).await {
             Some(t) => { save_token(&t); eprintln!("[startup] token = {}", hex(&t)); t }
             None => {
-                eprintln!("[startup] registration failed — is pnet running on {PNET_ADDR}?");
+                eprintln!("[startup] registration failed — is pnet running on {pnet_addr}?");
                 std::process::exit(1);
             }
         }
