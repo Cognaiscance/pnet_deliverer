@@ -14,7 +14,7 @@ use tokio::net::UdpSocket;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const PNET_ADDR: &str = "127.0.0.1:7777";
+const PNET_ADDR_DEFAULT: &str = "127.0.0.1:7777";
 const TOKEN_FILE: &str = "pnet_token.bin";
 /// Port that pnet pushes received app packets to (registered with pnet).
 const PUSH_PORT: u16 = 8888;
@@ -403,7 +403,8 @@ async fn data_refresh_loop(state: Arc<AppState>) {
 
 #[tokio::main]
 async fn main() {
-    let pnet_addr: SocketAddr = PNET_ADDR.parse().unwrap();
+    let pnet_addr_str = std::env::var("PNET_ADDR").unwrap_or_else(|_| PNET_ADDR_DEFAULT.to_string());
+    let pnet_addr: SocketAddr = pnet_addr_str.parse().expect("invalid PNET_ADDR");
 
     let push_socket = Arc::new(
         UdpSocket::bind(format!("0.0.0.0:{PUSH_PORT}"))
